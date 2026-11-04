@@ -1,6 +1,6 @@
 # AIfront MCP Gateway
 
-Urumi is a Streamable HTTP gateway that presents Support Notes, Utility, and WooCommerce MCP servers as one authenticated tool surface. Callers use a gateway API key. The gateway checks that key, hides tools the key was not granted, and records the call. A separate dashboard signs in with a username and password to manage people, keys, grants, upstreams, and the audit log.
+AIfront is a Streamable HTTP gateway that presents Support Notes, Utility, and WooCommerce MCP servers as one authenticated tool surface. Callers use a gateway API key. The gateway checks that key, hides tools the key was not granted, and records the call. A separate dashboard signs in with a username and password to manage people, keys, grants, upstreams, and the audit log.
 
 This repository is the source tree. A Docker Compose project and a Kubernetes/Kind deployment are different environments. Starting one does not update the other. The current source, including registry-refresh compensation, is what the tests in this checkout exercise. It is not automatically what a previously built cluster image is running.
 
