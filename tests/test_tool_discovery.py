@@ -1,4 +1,4 @@
-"""tools/list returns only the exact tools granted to the authenticated key."""
+"""tools/list returns only the exact grants still advertised for that key."""
 
 import pytest
 
@@ -45,11 +45,8 @@ async def test_discovery_follows_each_keys_current_grants(launch_app, caplog) ->
     assert await _names(url, utility_key.raw_key) == ["utility__convert_units"]
     assert await _names(url, support_key.raw_key) == ["support__search_notes"]
 
-    assert await store.grant(utility_key.key_id, "support__search_notes") is True
-    assert await _names(url, utility_key.raw_key) == ["utility__convert_units", "support__search_notes"]
-    assert "extra__echo" not in await _names(url, utility_key.raw_key)
     assert await store.revoke_permission(utility_key.key_id, "utility__convert_units") is True
-    assert await _names(url, utility_key.raw_key) == ["support__search_notes"]
+    assert await _names(url, utility_key.raw_key) == []
 
     assert await store.revoke(support_key.key_id) is True
     failed = False

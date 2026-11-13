@@ -1,10 +1,10 @@
 """Shared tool execution path.
 
-HTTP clients and a future dashboard chat both call execute_tool. The principal
+HTTP clients and the dashboard chat both call execute_tool. The principal
 must be a Principal sealed by Authenticator after the key hash matches.
-execute_tool checks that the key is still active, then checks that key's
-exact tool permissions, then calls the registry. There is no second
-execution implementation.
+A live key may call a tool only when that exact public name is stored for
+that key id. A key with no grants is denied. gateway__read_status is not a
+tool. There is no second execution implementation.
 """
 
 import asyncio
@@ -17,17 +17,25 @@ from mcp.types import CallToolResult, TextContent
 from apps.gateway.app.audit import Auditor, public_tool_name
 from apps.gateway.app.auth import Authenticator
 from apps.gateway.app.keys import UNAUTHENTICATED, StoreUnavailable
-from apps.gateway.app.permissions import STATUS_READ_PERMISSION
+from apps.gateway.app.permissions import is_tool_permission
 from apps.gateway.app.registry import Registry
+from apps.gateway.app.stores.routing import store_call_allowed
 
 logger = logging.getLogger(__name__)
 
 
 class ToolDispatcher:
-    def __init__(self, registry: Registry, authenticator: Authenticator, auditor: Auditor) -> None:
+    def __init__(
+        self,
+        registry: Registry,
+        authenticator: Authenticator,
+        auditor: Auditor,
+        store: object | None = None,
+    ) -> None:
         self.registry = registry
         self._authenticator = authenticator
         self._auditor = auditor
+        self._store = store
 
     async def execute_tool(
         self,
@@ -51,10 +59,9 @@ class ToolDispatcher:
             await self._auditor.record(actor, tool, "unauthorized", user_id=decision.user_id)
             return _auth_error()
 
-        if tool == STATUS_READ_PERMISSION:
+        if not is_tool_permission(tool):
             await self._auditor.record(decision.actor, tool, "unauthorized", user_id=decision.user_id)
             return _error("Permission denied.")
-
         try:
             allowed = await self._authenticator.permits(decision.actor, tool)
         except StoreUnavailable:
@@ -63,6 +70,15 @@ class ToolDispatcher:
             return _auth_error()
         if not allowed:
             await self._auditor.record(decision.actor, tool, "unauthorized", user_id=decision.user_id)
+            return _error("Permission denied.")
+        if not await store_call_allowed(self._store, tool, owner_user_id=decision.user_id):
+            await self._auditor.record(
+                decision.actor,
+                tool,
+                "unauthorized",
+                upstream_id=tool.partition("__")[0],
+                user_id=decision.user_id,
+            )
             return _error("Permission denied.")
 
         started = time.perf_counter()

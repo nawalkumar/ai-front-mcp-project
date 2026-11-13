@@ -318,6 +318,14 @@ networkPolicy:
   enabled: true
   ingressNamespace: ingress-nginx
   allowExternalEgress: true
+  # Public IPv4 /32 addresses the gateway alone may reach on TCP 443, for
+  # example a chat provider. Use this instead of allowExternalEgress when only
+  # the gateway needs one external host. Private, loopback, link-local,
+  # CGNAT, multicast, and default routes are rejected at render time.
+  gatewayEgressCIDRs: []
+  # Kubelet probe sources. These are node addresses, not pod CIDRs.
+  # Leaving this empty does not add an allow rule.
+  probeCIDRs: []
 
 database:
   replicas: 1
@@ -422,3 +430,36 @@ probes:
       periodSeconds: 10
       timeoutSeconds: 5
       failureThreshold: 6
+
+# Off by default. Helm refuses to render the provisioner when enabled is
+# true and admit is false. Admit stays false until a disposable cluster has
+# shown the ValidatingAdmissionPolicy denying cross-namespace writes. The
+# public gateway does not mount the provisioner token. Do not helm upgrade
+# the kind-urumi-k8s-dev release to turn either flag on.
+storeProvisioner:
+  enabled: false
+  admit: false
+  maxPerUser: 3
+  timeoutSeconds: 600
+  concurrency: 2
+  maxAttempts: 5
+  ingressBaseDomain: stores.local
+  ingressNamespace: ingress-nginx
+  ingressClass: nginx
+  # Empty uses the cluster default StorageClass. Volume deletion follows that
+  # class's reclaim policy. Retain volumes are deleted by the provisioner only
+  # when claimRef.namespace is the store namespace being removed.
+  storageClass: ""
+  probeCidrs: ""
+  allowPluginEgress: false
+  # Kubernetes API destinations the provisioner may reach, as {cidr, port}.
+  # Include the kubernetes Service ClusterIP on its port and every
+  # EndpointSlice address on its target port, because Calico applies egress
+  # policy after kube-proxy rewrites the Service address. Each cidr must be a
+  # single host. Empty keeps the older rule: TCP 443 and 6443 to any address.
+  apiServerEgress: []
+  images:
+    wordpress: wordpress:6.8-php8.2-apache
+    mariadb: mariadb:11.4
+    wordpressCli: wordpress:cli-php8.2
+    woocommerceMcp: urumi-woocommerce-mcp:local

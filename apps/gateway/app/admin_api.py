@@ -22,6 +22,9 @@ from apps.gateway.app.passwords import generate_password, hash_password, verify_
 from apps.gateway.app.permissions import is_permission_name
 from apps.gateway.app.secretsbox import CredentialKeyMissing, CredentialUnreadable, credential_key_configured, seal_secret
 from apps.gateway.app.ssrf import UnsafeUpstreamUrl, validate_upstream_url
+from apps.gateway.app.stores.model import reserved_store_upstream
+from apps.gateway.app.stores.repository import get_store
+from apps.gateway.app.stores.routing import store_id_from_tool
 
 _USERNAME = re.compile(r"[a-z][a-z0-9_-]{2,31}")
 _UPSTREAM_ID = re.compile(r"[a-z][a-z0-9_-]{0,62}")
@@ -169,19 +172,20 @@ def register_admin_routes(app: FastAPI, store: object, registry: object, setting
 
     @app.post("/admin/keys")
     async def issue_key(request: Request) -> JSONResponse:
-        actor = await _admin(store, request)
+        actor = await _user(store, request)
         if isinstance(actor, JSONResponse):
             return actor
         body = await _body(request)
-        if body is None or not isinstance(body.get("user_id"), str):
-            return _bad()
+        target_id = _key_owner(actor, body)
+        if isinstance(target_id, JSONResponse):
+            return target_id
         try:
-            issued = await store.issue_for_user(body["user_id"])  # type: ignore[attr-defined]
+            issued = await store.issue_for_user(target_id)  # type: ignore[attr-defined]
         except StoreUnavailable:
             return _bad()
         await _audit_mutation(auditor, actor, "admin:issue_key", issued.key_id)
         return JSONResponse(
-            {"key_id": issued.key_id, "api_key": issued.raw_key, "user_id": body["user_id"]},
+            {"key_id": issued.key_id, "api_key": issued.raw_key, "user_id": target_id},
             status_code=201,
         )
 
@@ -209,8 +213,20 @@ def register_admin_routes(app: FastAPI, store: object, registry: object, setting
         body = await _body(request)
         if body is None or not is_permission_name(body.get("tool_name")):
             return _bad()
+        tool_name = body["tool_name"]
+        store_id = store_id_from_tool(tool_name)
+        if store_id is not None:
+            if store_id == "":
+                return _bad()
+            try:
+                row = await store.get(key_id)  # type: ignore[attr-defined]
+                record = await get_store(store, store_id)
+            except StoreUnavailable:
+                return _unavailable()
+            if row is None or not row.user_id or record is None or record.owner_user_id != row.user_id:
+                return _bad()
         try:
-            changed = await store.grant(key_id, body["tool_name"])  # type: ignore[attr-defined]
+            changed = await store.grant(key_id, tool_name)  # type: ignore[attr-defined]
         except StoreUnavailable:
             return _unavailable()
         if not changed:
@@ -277,7 +293,7 @@ def register_admin_routes(app: FastAPI, store: object, registry: object, setting
         if isinstance(parsed, JSONResponse):
             return parsed
         upstream_id, url, enabled, credential = parsed
-        if any(item.name == upstream_id for item in settings.upstreams):
+        if reserved_store_upstream(upstream_id) or any(item.name == upstream_id for item in settings.upstreams):
             return _bad()
         try:
             sealed = _seal(credential)
@@ -313,7 +329,7 @@ def register_admin_routes(app: FastAPI, store: object, registry: object, setting
         actor = await _admin(store, request)
         if isinstance(actor, JSONResponse):
             return actor
-        if _UPSTREAM_ID.fullmatch(upstream_id) is None or "__" in upstream_id:
+        if reserved_store_upstream(upstream_id) or _UPSTREAM_ID.fullmatch(upstream_id) is None or "__" in upstream_id:
             return _bad()
         body = await _body(request)
         if body is None or not isinstance(body.get("enabled"), bool):
@@ -387,7 +403,7 @@ def register_admin_routes(app: FastAPI, store: object, registry: object, setting
         actor = await _admin(store, request)
         if isinstance(actor, JSONResponse):
             return actor
-        if any(item.name == upstream_id for item in settings.upstreams):
+        if reserved_store_upstream(upstream_id) or any(item.name == upstream_id for item in settings.upstreams):
             return _bad()
         try:
             current = next((row for row in await store.list_upstreams() if row.upstream_id == upstream_id), None)  # type: ignore[attr-defined]
@@ -637,12 +653,28 @@ async def _key_list(store: object, user_id: str | None) -> JSONResponse:
                     "key_id": row.key_id,
                     "user_id": row.user_id,
                     "revoked": row.revoked_at is not None,
+                    "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else "",
                     "permissions": await store.list_permissions(row.key_id),  # type: ignore[attr-defined]
                 }
             )
     except StoreUnavailable:
         return _unavailable()
     return JSONResponse({"keys": payload})
+
+
+def _key_owner(actor: UserRecord, body: dict | None) -> str | JSONResponse:
+    """Admins name the owner. Members can issue a key only for themselves."""
+    if actor.role == "admin":
+        if body is None or not isinstance(body.get("user_id"), str) or body["user_id"] == "":
+            return _bad()
+        return body["user_id"]
+    if body is not None and "user_id" in body:
+        supplied = body.get("user_id")
+        if not isinstance(supplied, str):
+            return _bad()
+        if supplied != actor.user_id:
+            return JSONResponse(_FORBIDDEN, status_code=403)
+    return actor.user_id
 
 
 async def _owns_key(store: object, user: UserRecord, key_id: str) -> bool:

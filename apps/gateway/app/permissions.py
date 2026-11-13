@@ -3,9 +3,10 @@
 A tool permission is one public tool name, such as ``utility__convert_units``.
 ``gateway__read_status`` is the only non-tool permission. It authorizes
 ``GET /admin/status`` when that check is required. It is not an upstream tool.
-A new key has no permissions. Missing permissions are not treated as access to
-every tool, and a name containing ``*`` is not a wildcard. Grant and revoke
-only through ``KeyStore.grant`` and ``KeyStore.revoke_permission``.
+A new key has no stored grants and cannot list or call tools until an exact
+public name is granted. Stored grants are not a wildcard. A name containing
+``*`` is not a stored wildcard. Grant and revoke only through
+``KeyStore.grant`` and ``KeyStore.revoke_permission``.
 """
 
 import re

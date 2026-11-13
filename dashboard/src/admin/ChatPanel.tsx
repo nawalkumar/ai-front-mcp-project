@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { adminRequest, errorText } from "./adminClient";
 
 type Activity = { tool: string; outcome: string };
-type Turn = { role: "user" | "assistant"; content: string; activity: Activity[] };
+type Turn = { role: "user" | "assistant"; content: string; activity: Activity[]; partial?: boolean };
 
 const HISTORY_LIMIT = 12;
 
@@ -27,7 +27,7 @@ export function ChatPanel() {
       return;
     }
     const activity = Array.isArray(body.activity) ? body.activity.filter(isActivity) : [];
-    const assistant: Turn = { role: "assistant", content: body.message, activity };
+    const assistant: Turn = { role: "assistant", content: body.message, activity, partial: body.partial === true };
     setTurns([...history, assistant].slice(-HISTORY_LIMIT));
   }
 
@@ -44,16 +44,21 @@ export function ChatPanel() {
   }
 
   return (
-    <section className="chat-panel" aria-label="Chat">
+    <section id="chat" className="chat-panel panel" aria-label="Chat">
       <h3>Chat</h3>
-      <p>The last {HISTORY_LIMIT} messages are sent. Conversations are not stored.</p>
-      <ol>
+      <p className="hint">The last {HISTORY_LIMIT} messages are sent. Conversations are not stored.</p>
+      <ol className="chat-log">
         {turns.map((turn, index) => (
-          <li key={`${turn.role}-${index}`}>
-            <strong>{turn.role === "user" ? "You" : "Assistant"}</strong>
+          <li key={`${turn.role}-${index}`} className={turn.role === "user" ? "chat-turn chat-turn-user" : "chat-turn chat-turn-assistant"}>
+            <strong className="chat-author">{turn.role === "user" ? "You" : "Assistant"}</strong>
+            {turn.partial ? (
+              <p role="alert">
+                <strong>PARTIAL RESULT.</strong> The tool activity may have completed, but the assistant&apos;s answer is incomplete.
+              </p>
+            ) : null}
             <p>{turn.content}</p>
             {turn.activity.length > 0 ? (
-              <ul>
+              <ul className="activity-list">
                 {turn.activity.map((item, activityIndex) => (
                   <li key={`${item.tool}-${activityIndex}`}>
                     {item.tool}: {item.outcome}
@@ -68,12 +73,12 @@ export function ChatPanel() {
       {error ? (
         <p role="alert">
           {error}{" "}
-          <button type="button" onClick={() => void send(turns)} disabled={pending}>
+          <button type="button" className="btn-secondary btn-sm" onClick={() => void send(turns)} disabled={pending}>
             Retry
           </button>
         </p>
       ) : null}
-      <form onSubmit={(event) => void onSubmit(event)}>
+      <form className="chat-composer" onSubmit={(event) => void onSubmit(event)}>
         <label>
           Message
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={2000} />
@@ -86,7 +91,7 @@ export function ChatPanel() {
   );
 }
 
-function isChatBody(value: unknown): value is { message: string; activity?: unknown } {
+function isChatBody(value: unknown): value is { message: string; activity?: unknown; partial?: unknown } {
   if (!value || typeof value !== "object" || !("message" in value)) {
     return false;
   }

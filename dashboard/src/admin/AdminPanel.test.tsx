@@ -12,6 +12,11 @@ test("administration controls call the gateway and do not store secrets", async 
   const user = userEvent.setup();
   const calls: Array<{ url: string; method: string; body: string | null; csrf: string | null }> = [];
   const issued = "urk_once.secret-shown-once";
+  const keys = [
+    { key_id: "0011223344556677", user_id: "def", revoked: false, created_at: "2026-10-11T00:00:00+00:00", permissions: ["support__search_notes"] },
+    { key_id: "aabbccddeeff0011", user_id: null, revoked: false, created_at: "2026-10-10T00:00:00+00:00", permissions: [] },
+    { key_id: "ffeeddccbbaa9988", user_id: "missinguser000000", revoked: false, created_at: "2026-10-09T00:00:00+00:00", permissions: [] },
+  ];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47,16 +52,17 @@ test("administration controls call the gateway and do not store secrets", async 
         });
       }
       if (url === "/admin/keys" && method === "GET") {
-        return json(200, {
-          keys: [
-            { key_id: "0011223344556677", user_id: "def", revoked: false, permissions: ["support__search_notes"] },
-            { key_id: "aabbccddeeff0011", user_id: null, revoked: false, permissions: [] },
-            { key_id: "ffeeddccbbaa9988", user_id: "missinguser000000", revoked: false, permissions: [] },
-          ],
-        });
+        return json(200, { keys });
       }
       if (url === "/admin/keys" && method === "POST") {
-        return json(201, { key_id: "0011223344556677", api_key: issued, user_id: "abc" });
+        keys.unshift({
+          key_id: "1122334455667788",
+          user_id: "def",
+          revoked: false,
+          created_at: "2026-10-19T11:02:04+00:00",
+          permissions: [],
+        });
+        return json(201, { key_id: "1122334455667788", api_key: issued, user_id: "def" });
       }
       if (url === "/admin/audit") {
         return json(200, {
@@ -101,6 +107,12 @@ test("administration controls call the gateway and do not store secrets", async 
   await user.click(screen.getByRole("button", { name: "Issue API key" }));
   expect(await screen.findByText(`API key, shown once: ${issued}`)).toBeInTheDocument();
   expect(await screen.findByText("utility__convert_units")).toBeInTheDocument();
+  const keyIds = screen.getAllByRole("row").map((row) => row.textContent ?? "");
+  const issuedRow = keyIds.findIndex((text) => text.includes("1122334455667788"));
+  const olderRow = keyIds.findIndex((text) => text.includes("0011223344556677"));
+  expect(issuedRow).toBeGreaterThan(0);
+  expect(olderRow).toBeGreaterThan(issuedRow);
+  expect(screen.getByText("1122334455667788 New")).toBeInTheDocument();
   expect(calls.every((call) => call.csrf === "1")).toBe(true);
   expect(calls.some((call) => call.url === "/admin/keys" && call.method === "POST" && call.body === JSON.stringify({ user_id: "def" }))).toBe(true);
   expect(calls.some((call) => call.body?.includes("abc") && call.url === "/admin/keys" && call.method === "POST")).toBe(false);
@@ -218,6 +230,47 @@ test("upstream diagnostics show a collision and an empty state", async () => {
   await user.click(screen.getByRole("button", { name: "Refresh upstreams" }));
   expect(await screen.findByText("No diagnostics reported.")).toBeInTheDocument();
   expect(screen.queryByText("tool_excluded")).not.toBeInTheDocument();
+});
+
+test("a member can issue only their own API key", async () => {
+  const user = userEvent.setup();
+  const calls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/admin/keys" && method === "POST") {
+        calls.push(typeof init?.body === "string" ? init.body : "");
+        return json(201, { key_id: "ffeeddccbbaa9988", api_key: "urk_member.shown-once", user_id: "def" });
+      }
+      if (url === "/admin/me") {
+        return json(401, { error: "invalid_token" });
+      }
+      if (url === "/admin/login") {
+        return json(200, { user_id: "def", username: "bea", role: "member", disabled: false });
+      }
+      if (url === "/admin/keys" && method === "GET") {
+        return json(200, { keys: [] });
+      }
+      if (url === "/admin/audit") {
+        return json(200, { entries: [] });
+      }
+      return json(403, { error_description: "The request was rejected." });
+    }),
+  );
+
+  render(<AdminPanel />);
+  await user.click(screen.getByRole("button", { name: "Open team administration" }));
+  await user.type(screen.getByLabelText("Username"), "bea");
+  await user.type(screen.getByLabelText("Password"), "temporary");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  expect(await screen.findByText(/Signed in as bea \(member\)/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("User for new key")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create member" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Issue my API key" }));
+  expect(await screen.findByText("API key, shown once: urk_member.shown-once")).toBeInTheDocument();
+  expect(calls).toEqual([JSON.stringify({ user_id: "def" })]);
 });
 
 function json(status: number, body: unknown): Response {

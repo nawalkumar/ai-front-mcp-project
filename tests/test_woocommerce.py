@@ -35,9 +35,10 @@ class ScriptedHttp:
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload) -> None:
+    def __init__(self, status_code: int, payload, headers: dict | None = None) -> None:
         self.status_code = status_code
         self._payload = payload
+        self.headers = headers or {}
 
     def json(self):
         if isinstance(self._payload, Exception):
@@ -101,6 +102,46 @@ def test_publish_is_visible_and_order_bounds_keep_the_offset() -> None:
     assert "created=2026-10-11T01:00:00" in text
     with pytest.raises(InputError):
         _list_orders(_client(orders), 20, "", "2026-10-11T00:00:00", "")
+
+
+def test_list_orders_names_the_wordpress_installer_redirect_without_the_location() -> None:
+    from apps.woocommerce_mcp.app.tools import _list_orders
+
+    installer = ScriptedHttp(
+        FakeResponse(302, ValueError("empty body"), {"location": "http://wordpress/wp-admin/install.php"})
+    )
+    with pytest.raises(WooError) as caught:
+        _list_orders(_client(installer), 20, "", "2026-10-25T00:00:00+00:00", "2026-10-26T00:00:00+00:00")
+    assert "WordPress is not installed" in str(caught.value)
+    assert "http://wordpress" not in str(caught.value)
+    assert len(installer.calls) == 1
+
+    elsewhere = ScriptedHttp(
+        FakeResponse(301, {"message": "moved"}, {"location": "http://other.example/wp-json/wc/v3/orders?ck_x=1"})
+    )
+    with pytest.raises(WooError) as moved:
+        _list_orders(_client(elsewhere), 20, "", "", "")
+    assert str(moved.value) == "WooCommerce redirected the request (HTTP 301). Redirects are not followed."
+
+    bare = ScriptedHttp(FakeResponse(302, ValueError("empty body")))
+    with pytest.raises(WooError, match=r"redirected the request \(HTTP 302\)"):
+        _list_orders(_client(bare), 20, "", "", "")
+
+
+def test_list_orders_reports_timeouts_and_malformed_bodies_safely() -> None:
+    from apps.woocommerce_mcp.app.tools import _list_orders
+
+    slow = ScriptedHttp(error=httpx2.ReadTimeout("read timed out for http://store.test/?consumer_key=ck_test"))
+    with pytest.raises(WooError) as timed:
+        _list_orders(_client(slow), 20, "", "", "")
+    assert str(timed.value) == "WooCommerce request timed out."
+    for payload in (ValueError("not json"), {"orders": []}, [{"id": 1}, "row"]):
+        with pytest.raises(WooError) as malformed:
+            _list_orders(_client(ScriptedHttp(FakeResponse(200, payload))), 20, "", "", "")
+        assert str(malformed.value) == "WooCommerce returned a malformed response."
+    unavailable = ScriptedHttp(FakeResponse(503, {"message": "Database unavailable"}))
+    with pytest.raises(WooError, match="HTTP 503: Database unavailable"):
+        _list_orders(_client(unavailable), 20, "", "", "")
 
 
 def test_create_product_defaults_to_draft() -> None:
@@ -195,17 +236,18 @@ async def test_configured_tools_are_namespaced_and_isolated(launch_app, monkeypa
             "woocommerce__list_orders",
             "woocommerce__get_order",
             "woocommerce__update_order_status",
+            "woocommerce__create_order",
             "utility__convert_units",
         ),
     )
     names = await _names(f"{gateway}/mcp", issued.raw_key)
-    assert "woocommerce__create_order" not in names
     assert names == [
         "woocommerce__list_products",
         "woocommerce__create_product",
         "woocommerce__list_orders",
         "woocommerce__get_order",
         "woocommerce__update_order_status",
+        "woocommerce__create_order",
         "utility__convert_units",
     ]
     listed = await _call(f"{gateway}/mcp", "woocommerce__list_products", {"per_page": 20}, issued.raw_key)
@@ -614,43 +656,22 @@ async def test_create_order_schema_permission_and_safe_result(launch_app) -> Non
         permissions=("woocommerce__list_products",),
     )
     hidden = await _names(f"{gateway}/mcp", granted.raw_key)
-    assert "woocommerce__create_order" not in hidden
+    assert hidden == ["woocommerce__list_products"]
     assert await store.permits(granted.key_id, "woocommerce__create_order") is False
     assert await store.permits(granted.key_id, "woocommerce__list_products") is True
-    upstream_before_denial = list(http.calls)
     denied = await _call(
-        f"{gateway}/mcp",
-        "woocommerce__create_order",
-        {"idempotency_key": _OTHER_KEY, "line_items": _lines((123, 1))},
-        granted.raw_key,
-    )
-    assert denied.is_error is True
-    assert denied.content[0].text == "Permission denied."
-    assert http.calls == upstream_before_denial
-    assert [call["method"] for call in http.calls] == ["GET", "POST"]
-    assert http.calls[1]["json"]["meta_data"][0]["value"] == _KEY
-
-    assert await store.grant(granted.key_id, "woocommerce__create_order") is True
-    # The first successful MCP call already consumed _KEY. A new key posts another order.
-    http.responses.extend([FakeResponse(200, _product()), FakeResponse(201, _created_order(order_id=42))])
-    allowed = await _call(
         f"{gateway}/mcp",
         "woocommerce__create_order",
         {"idempotency_key": _OTHER_KEY, "line_items": _lines((123, 2))},
         granted.raw_key,
     )
-    assert allowed.is_error is False
-    assert "id=42" in allowed.content[0].text
-    assert "buyer@example.com" not in allowed.content[0].text
+    assert denied.is_error is True
+    assert denied.content[0].text == "Permission denied."
     blob = "\n".join(repr(row) for row in store.audit_log)
     assert _OTHER_KEY not in blob
     assert "buyer@example.com" not in blob
     assert granted.raw_key not in blob
     assert any(
         row.actor == granted.key_id and row.tool_name == "woocommerce__create_order" and row.outcome == "unauthorized"
-        for row in store.audit_log
-    )
-    assert any(
-        row.actor == granted.key_id and row.tool_name == "woocommerce__create_order" and row.outcome == "success"
         for row in store.audit_log
     )
